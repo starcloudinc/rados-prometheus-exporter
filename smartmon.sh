@@ -13,7 +13,29 @@
 
 # Ensure predictable numeric / date formats, etc.
 export LC_ALL=C
+# Score the quality of smartctl output for a given driver
+# Higher score = more complete/trustworthy data
+get_smartctl_driver() {
+  local disk="$1"
+  local udev vendor_id
 
+  udev="$(udevadm info --query=all --name="${disk}" 2>/dev/null)"
+
+  # If kernel identifies it as a real SATA device, sat is always correct
+  if echo "${udev}" | grep -q "^E: ID_ATA_SATA=1"; then
+    echo "sat"
+    return 0
+  fi
+
+  # Not SATA — determine NVMe bridge type from USB vendor ID
+  vendor_id="$(echo "${udev}" | awk -F= '/^E: ID_USB_VENDOR_ID/{print $2}')"
+  case "${vendor_id}" in
+    0bda)  echo "sntrealtek" ;;
+    152d)  echo "sntjmicron" ;;
+    "")    echo "sat" ;;        # No USB vendor — internal drive
+    *)     echo "sat" ;;        # Unknown bridge — best guess
+  esac
+}
 parse_smartctl_attributes_awk="$(
   cat <<'SMARTCTLAWK'
 $1 ~ /^ *[0-9]+$/ && $2 ~ /^[a-zA-Z0-9_-]+$/ {
@@ -233,21 +255,11 @@ if [[ "$(expr "${smartctl_version}" : '\([0-9]*\)\..*')" -lt 6 ]]; then
 fi
 
 device_list="$(/usr/sbin/smartctl --scan-open | awk '/^\/dev/{print $1 "|" $3}')"
-
 for device in ${device_list}; do
   disk="$(echo "${device}" | cut -f1 -d'|')"
   type="$(echo "${device}" | cut -f2 -d'|')"
-
-  if [ "${type}" = "sat" ]; then
-    # Quick check: does it fail to identify as SAT but respond to JMicron?
-    if ! /usr/sbin/smartctl -i -d sat "${disk}" > /dev/null 2>&1; then
-       if /usr/sbin/smartctl -i -d sntjmicron "${disk}" > /dev/null 2>&1; then
-          type="sntjmicron"
-       fi
-       if /usr/sbin/smartctl -i -d sntrealtek "$disk" > /dev/null 2>&1; then
-         type="sntrealtek"
-       fi
-    fi
+  if [ "${type}" = "sat" ] || [ "${type}" = "sntjmicron" ] || [ "${type}" = "sntrealtek" ]; then
+    type="$(get_smartctl_driver "${disk}")"
   fi
 
 
